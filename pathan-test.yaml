@@ -19,6 +19,20 @@ Parameters:
     Description: GitHub Personal Access Token (store in AWS Secrets Manager or provide manually)
 
 Resources:
+  pathanCodePipelineArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub pathan-codepipeline-artifacts-${AWS::AccountId}
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 90  # Optional: Clean up artifacts after 90 days
+      Tags:
+        - Key: Name
+          Value: pathan-codepipeline-artifacts
+          
   pathanVPC:
     Type: AWS::EC2::VPC
     Properties:
