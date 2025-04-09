@@ -1,0 +1,536 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Pathan Assignment - AWS ECS Fargate Deployment with CI/CD and Monitoring
+
+Parameters:
+  GitHubOwner:
+    Type: String
+    Description: Your GitHub username
+  GitHubRepo:
+    Type: String
+    Default: todo-app
+    Description: GitHub repository name
+  GitHubBranch:
+    Type: String
+    Default: main
+    Description: GitHub branch name
+  GitHubToken:
+    Type: String
+    NoEcho: true
+    Description: GitHub Personal Access Token (store in AWS Secrets Manager or provide manually)
+
+Resources:
+  pathanVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: pathan-vpc
+
+  pathanPublicSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - pathanVPC
+    Properties:
+      VpcId: !Ref pathanVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: ca-central-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: pathan-public-subnet-1
+
+  pathanPublicSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - pathanVPC
+    Properties:
+      VpcId: !Ref pathanVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: ca-central-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: pathan-public-subnet-2
+
+  pathanPrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - pathanVPC
+    Properties:
+      VpcId: !Ref pathanVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: ca-central-1a
+      Tags:
+        - Key: Name
+          Value: pathan-private-subnet-1
+
+  pathanPrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    DependsOn:
+      - pathanVPC
+    Properties:
+      VpcId: !Ref pathanVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: ca-central-1b
+      Tags:
+        - Key: Name
+          Value: pathan-private-subnet-2
+
+  pathanInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: pathan-igw
+
+  pathanVPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    DependsOn:
+      - pathanVPC
+      - pathanInternetGateway
+    Properties:
+      VpcId: !Ref pathanVPC
+      InternetGatewayId: !Ref pathanInternetGateway
+
+  pathanPublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn:
+      - pathanVPC
+    Properties:
+      VpcId: !Ref pathanVPC
+      Tags:
+        - Key: Name
+          Value: pathan-public-rt
+
+  pathanPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - pathanPublicRouteTable
+      - pathanVPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref pathanPublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref pathanInternetGateway
+
+  pathanPublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - pathanPublicSubnet1
+      - pathanPublicRouteTable
+    Properties:
+      SubnetId: !Ref pathanPublicSubnet1
+      RouteTableId: !Ref pathanPublicRouteTable
+
+  pathanPublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - pathanPublicSubnet2
+      - pathanPublicRouteTable
+    Properties:
+      SubnetId: !Ref pathanPublicSubnet2
+      RouteTableId: !Ref pathanPublicRouteTable
+
+  pathanPrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    DependsOn:
+      - pathanVPC
+    Properties:
+      VpcId: !Ref pathanVPC
+      Tags:
+        - Key: Name
+          Value: pathan-private-rt
+
+  pathanNATGatewayEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  pathanNATGateway:
+    Type: AWS::EC2::NatGateway
+    DependsOn:
+      - pathanNATGatewayEIP
+      - pathanPublicSubnet1
+    Properties:
+      AllocationId: !GetAtt pathanNATGatewayEIP.AllocationId
+      SubnetId: !Ref pathanPublicSubnet1
+      Tags:
+        - Key: Name
+          Value: pathan-nat
+
+  pathanPrivateRoute:
+    Type: AWS::EC2::Route
+    DependsOn:
+      - pathanPrivateRouteTable
+      - pathanNATGateway
+    Properties:
+      RouteTableId: !Ref pathanPrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref pathanNATGateway
+
+  pathanPrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - pathanPrivateSubnet1
+      - pathanPrivateRouteTable
+    Properties:
+      SubnetId: !Ref pathanPrivateSubnet1
+      RouteTableId: !Ref pathanPrivateRouteTable
+
+  pathanPrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    DependsOn:
+      - pathanPrivateSubnet2
+      - pathanPrivateRouteTable
+    Properties:
+      SubnetId: !Ref pathanPrivateSubnet2
+      RouteTableId: !Ref pathanPrivateRouteTable
+
+  # --- Security Groups ---
+  pathanALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn:
+      - pathanVPC
+    Properties:
+      GroupDescription: Security group for pathan ALB
+      VpcId: !Ref pathanVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: pathan-alb-sg
+
+  pathanECSSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn:
+      - pathanVPC
+      - pathanALBSecurityGroup
+    Properties:
+      GroupDescription: Security group for pathan ECS tasks
+      VpcId: !Ref pathanVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref pathanALBSecurityGroup
+      Tags:
+        - Key: Name
+          Value: pathan-ecs-sg
+
+  # --- Application Load Balancer ---
+  pathanLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - pathanPublicSubnet1
+      - pathanPublicSubnet2
+      - pathanALBSecurityGroup
+    Properties:
+      Name: pathan-alb
+      Subnets:
+        - !Ref pathanPublicSubnet1
+        - !Ref pathanPublicSubnet2
+      SecurityGroups:
+        - !Ref pathanALBSecurityGroup
+      Scheme: internet-facing
+      Type: application
+
+  pathanTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+      - pathanVPC
+    Properties:
+      Name: pathan-tg
+      Port: 3000
+      Protocol: HTTP
+      VpcId: !Ref pathanVPC
+      TargetType: ip
+      HealthCheckPath: /
+
+  pathanListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - pathanLoadBalancer
+      - pathanTargetGroup
+    Properties:
+      LoadBalancerArn: !Ref pathanLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref pathanTargetGroup
+
+  # --- ECS Cluster ---
+  pathanECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: pathan-ecs-cluster
+
+  # --- CloudWatch Log Group for ECS Tasks ---
+  pathanLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /ecs/pathan-todo-app
+      RetentionInDays: 7
+
+  # --- ECS Task Definition ---
+  pathanTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn:
+      - pathanTaskExecutionRole
+      - pathanLogGroup
+    Properties:
+      Family: pathan-todo-app-task
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      Cpu: '256'
+      Memory: '512'
+      ExecutionRoleArn: !GetAtt pathanTaskExecutionRole.Arn
+      ContainerDefinitions:
+        - Name: todo-app
+          Image: 664418999049.dkr.ecr.ca-central-1.amazonaws.com/pathan-todo-app-repo
+          PortMappings:
+            - ContainerPort: 3000
+          Essential: true
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref pathanLogGroup
+              awslogs-region: ca-central-1
+              awslogs-stream-prefix: todo-app
+
+  pathanTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  # --- ECS Service ---
+  pathanECSService:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - pathanECSCluster
+      - pathanTaskDefinition
+      - pathanECSSecurityGroup
+      - pathanListener
+    Properties:
+      Cluster: !Ref pathanECSCluster
+      ServiceName: pathan-ecs-service
+      TaskDefinition: !Ref pathanTaskDefinition
+      DesiredCount: 1
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          Subnets:
+            - !Ref pathanPrivateSubnet1
+            - !Ref pathanPrivateSubnet2
+          SecurityGroups:
+            - !Ref pathanECSSecurityGroup
+      LoadBalancers:
+        - ContainerName: todo-app
+          ContainerPort: 3000
+          TargetGroupArn: !Ref pathanTargetGroup
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+
+  # --- CodeBuild Role ---
+  pathanCodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pathanCodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:*
+                  - logs:*
+                  - s3:*
+                Resource: '*'
+
+  # --- CodeBuild Project ---
+  pathanCodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    DependsOn:
+      - pathanCodeBuildRole
+    Properties:
+      Name: pathan-codebuild
+      ServiceRole: !GetAtt pathanCodeBuildRole.Arn
+      Artifacts:
+        Type: S3
+        Location: !Sub pathan-codepipeline-artifacts-${AWS::AccountId}
+        Name: BuildArtifact
+        NamespaceType: NONE
+        Packaging: ZIP
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: AWS_DEFAULT_REGION
+            Value: ca-central-1
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+          - Name: IMAGE_REPO_NAME
+            Value: pathan-todo-app-repo
+          - Name: IMAGE_TAG
+            Value: latest
+      Source:
+        Type: GITHUB
+        Location: !Sub https://github.com/${GitHubOwner}/${GitHubRepo}.git
+        BuildSpec: buildspec.yml
+
+  # --- CodePipeline Role ---
+  pathanCodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: pathanCodePipelinePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:*
+                  - ecs:*
+                  - s3:*
+                  - iam:PassRole
+                Resource: '*'
+
+  # --- CodePipeline ---
+  pathanCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    DependsOn:
+      - pathanCodePipelineRole
+      - pathanCodeBuildProject
+      - pathanECSService
+    Properties:
+      RoleArn: !GetAtt pathanCodePipelineRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Sub pathan-codepipeline-artifacts-${AWS::AccountId}
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Configuration:
+                Owner: !Ref GitHubOwner
+                Repo: !Ref GitHubRepo
+                Branch: !Ref GitHubBranch
+                OAuthToken: !Ref GitHubToken
+        - Name: Approval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ProjectName: !Ref pathanCodeBuildProject
+        - Name: Deploy
+          Actions:
+            - Name: Deploy
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: ECS
+                Version: '1'
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ClusterName: !Ref pathanECSCluster
+                ServiceName: !Ref pathanECSService
+                FileName: imagedefinitions.json
+
+  # --- SNS Topic for CloudWatch Alarm ---
+  AlarmSNS:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: pathanTodoAppAlarmTopic
+
+  # --- SNS Subscription ---
+  AlarmSNSSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn:
+      - AlarmSNS
+    Properties:
+      Protocol: email
+      Endpoint: "pathanjafar702@gmail.com"
+      TopicArn: !Ref AlarmSNS
+
+  # --- CloudWatch Alarm for Deployment Failures ---
+  DeploymentFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    DependsOn:
+      - pathanCodePipeline
+      - AlarmSNS
+    Properties:
+      AlarmName: pathanTodoAppDeploymentFailureAlarm
+      AlarmDescription: Alarm for CodePipeline deployment failures
+      Namespace: AWS/CodePipeline
+      MetricName: PipelineExecutionFailed
+      Dimensions:
+        - Name: PipelineName
+          Value: !Ref pathanCodePipeline
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref AlarmSNS
+      TreatMissingData: notBreaching
+
+Outputs:
+  LoadBalancerURL:
+    Description: URL of the Application Load Balancer
+    Value: !Sub http://${pathanLoadBalancer.DNSName}
